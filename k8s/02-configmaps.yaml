@@ -1,0 +1,33 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: banking-config
+  namespace: assignment3
+data:
+  shard_map.yaml: |
+    ranges:
+      - start: "A0001"
+        end: "A1000"
+        shard_id: "shard-a"
+      - start: "A1001"
+        end: "A2000"
+        shard_id: "shard-b"
+
+  gateway.yaml: |
+    replicas:
+      shard-a:
+        - id: shard-a-1
+          url: http://shard-a-1.shard-a:8000
+        - id: shard-a-2
+          url: http://shard-a-2.shard-a:8000
+      shard-b:
+        - id: shard-b-1
+          url: http://shard-b-1.shard-b:8000
+        - id: shard-b-2
+          url: http://shard-b-2.shard-b:8000
+    health:
+      interval_seconds: 2
+      timeout_seconds: 1
+      failures_to_unhealthy: 2
+      successes_to_healthy: 3
+    request_timeout_seconds: 5

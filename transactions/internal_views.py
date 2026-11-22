@@ -16,6 +16,17 @@ from rest_framework.response import Response
 from rest_framework.views import APIView
 
 from .models import Account
+from .idempotency import (
+    ACTION_LOCAL_TRANSFER,
+    Replay,
+    RequestConflict,
+    check_replay,
+    invalid_request_id_response,
+    record,
+    replay_after_integrity_error,
+    replay_or_conflict_response,
+    valid_request_id,
+)
 from .participant import (
     ParticipantError,
     commit as participant_commit,
@@ -96,6 +107,9 @@ class LocalTransferView(APIView):
         from_account = data['from_account']
         to_account = data['to_account']
         amount = data['amount']
+        request_id = request.data.get('request_id')
+        if request_id is not None and not valid_request_id(request_id):
+            return invalid_request_id_response()
 
         if from_account == to_account:
             return _error(
@@ -113,8 +127,6 @@ class LocalTransferView(APIView):
 
         try:
             with transaction.atomic():
-                # Lock in a deterministic order so concurrent transfers in
-                # opposite directions cannot deadlock.
                 accounts = {}
                 for account_number in sorted((from_account, to_account)):
                     accounts[account_number] = (
@@ -125,6 +137,13 @@ class LocalTransferView(APIView):
 
                 source = accounts[from_account]
                 destination = accounts[to_account]
+
+                if request_id is not None:
+                    detail = f'{from_account}->{to_account}:{amount}'
+                    try:
+                        check_replay(request_id, ACTION_LOCAL_TRANSFER, detail)
+                    except (Replay, RequestConflict) as replay_exc:
+                        return replay_or_conflict_response(replay_exc, request_id)
 
                 if source.balance < amount:
                     return _error(
@@ -141,24 +160,33 @@ class LocalTransferView(APIView):
                 destination.balance += amount
                 destination.save(update_fields=['balance', 'updated_at'])
 
+                response_body = {
+                    'status': 'success',
+                    'from_account': from_account,
+                    'to_account': to_account,
+                    'amount': str(amount),
+                    'from_balance': str(source.balance),
+                    'to_balance': str(destination.balance),
+                }
+                if request_id is not None:
+                    record(request_id, ACTION_LOCAL_TRANSFER, detail, response_body)
+
         except Account.DoesNotExist:
             return _error(
                 'UNKNOWN_ACCOUNT',
                 'One or both accounts do not exist on this shard',
                 status.HTTP_404_NOT_FOUND,
             )
+        except IntegrityError:
+            detail = f'{from_account}->{to_account}:{amount}'
+            replay_exc = replay_after_integrity_error(
+                request_id, ACTION_LOCAL_TRANSFER, detail
+            )
+            if replay_exc is not None:
+                return replay_or_conflict_response(replay_exc, request_id)
+            raise
 
-        return Response(
-            {
-                'status': 'success',
-                'from_account': from_account,
-                'to_account': to_account,
-                'amount': str(amount),
-                'from_balance': str(source.balance),
-                'to_balance': str(destination.balance),
-            },
-            status=status.HTTP_200_OK,
-        )
+        return Response(response_body, status=status.HTTP_200_OK)
 
 
 class ParticipantPrepareView(APIView):

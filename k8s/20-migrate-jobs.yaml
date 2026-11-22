@@ -1,0 +1,75 @@
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate-shard-a
+  namespace: assignment3
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: amirhossein002/banking_with_sharding:replica_api
+          command: ["python", "manage.py", "migrate", "--noinput"]
+          env:
+            - name: DB_HOST
+              value: "db-a-rw"
+            - name: DB_NAME
+              value: "banking_a"
+            - name: DB_USER
+              value: "banker"
+            - name: DB_PASSWORD
+              value: "1234"
+            - name: SHARD_ID
+              value: "shard-a"
+            - name: REPLICA_ID
+              value: "migrate-a"
+            - name: CONFIG_DIR
+              value: "/app/config"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            name: banking-config
+---
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: migrate-shard-b
+  namespace: assignment3
+spec:
+  template:
+    spec:
+      restartPolicy: OnFailure
+      containers:
+        - name: migrate
+          image: amirhossein002/banking_with_sharding:replica_api
+          command: ["python", "manage.py", "migrate", "--noinput"]
+          env:
+            - name: DB_HOST
+              value: "db-b-rw"
+            - name: DB_NAME
+              value: "banking_b"
+            - name: DB_USER
+              value: "banker"
+            - name: DB_PASSWORD
+              value: "1234"
+            - name: SHARD_ID
+              value: "shard-b"
+            - name: REPLICA_ID
+              value: "migrate-b"
+            - name: CONFIG_DIR
+              value: "/app/config"
+          volumeMounts:
+            - name: config-volume
+              mountPath: /app/config
+              readOnly: true
+      volumes:
+        - name: config-volume
+          configMap:
+            nkame: banking-config
+---

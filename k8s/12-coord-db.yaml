@@ -1,0 +1,29 @@
+apiVersion: postgresql.cnpg.io/v1
+kind: Cluster
+metadata:
+  name: coord-db
+  namespace: assignment3
+spec:
+  instances: 2
+  imageName: ghcr.io/cloudnative-pg/postgresql:16.4
+  primaryUpdateStrategy: unsupervised
+  minSyncReplicas: 1
+  maxSyncReplicas: 1
+  storage:
+    size: 1Gi
+  bootstrap:
+    initdb:
+      database: banking_coord
+      owner: banker
+      secret:
+        name: banking-db-credentials
+  postgresql:
+    parameters:
+      max_connections: "200"
+  resources:
+    requests:
+      memory: "256Mi"
+      cpu: "250m"
+    limits:
+      memory: "512Mi"
+      cpu: "1"

@@ -46,3 +46,25 @@ class ParticipantCommit(models.Model):
 
     def __str__(self):
         return self.gid
+
+
+class ProcessedRequest(models.Model):
+    """
+    Durable idempotency ledger for shard-local operations (Experiment 7).
+
+    One row per client request_id whose effect was applied on this shard.
+    The row is written in the same database transaction as the balance
+    change, so a request is either applied-and-recorded or neither. A repeat
+    of the same request_id returns the stored response without applying the
+    effect again. Repeats with a different action, accounts or amount are
+    rejected as a conflict, mirroring the coordinator's replay check.
+    """
+
+    request_id = models.CharField(max_length=128, unique=True, db_index=True)
+    action = models.CharField(max_length=16)
+    detail = models.CharField(max_length=120, blank=True)
+    response = models.JSONField()
+    created_at = models.DateTimeField(auto_now_add=True)
+
+    def __str__(self):
+        return f"{self.request_id} | {self.action}"

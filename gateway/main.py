@@ -331,6 +331,7 @@ async def _local_transfer(
     from_account: str,
     to_account: str,
     amount: Decimal,
+    request_id: str | None,
     trace_id: str,
 ) -> Response:
     config: GatewayConfig = request.app.state.config
@@ -365,6 +366,10 @@ async def _local_transfer(
         'to_account': to_account,
         'amount': str(amount),
     }
+    # The client's idempotency key must reach the shard, otherwise a retried
+    # same-shard transfer is applied again.
+    if request_id is not None:
+        payload['request_id'] = request_id
 
     started = time.perf_counter()
     try:
@@ -692,6 +697,7 @@ async def transfer(request: Request) -> Response:
             from_account,
             to_account,
             amount,
+            request_id,
             trace_id,
         )
 

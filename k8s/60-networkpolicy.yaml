@@ -1,0 +1,22 @@
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: restrict-shard-api-access
+  namespace: assignment3
+spec:
+  # 1. Who does this policy apply to?
+  podSelector:
+    matchLabels:
+      tier: shard-api
+  # 2. What type of traffic are we controlling?
+  policyTypes:
+    - Ingress
+  # 3. What traffic is explicitly ALLOWED? (Everything else is denied)
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              tier: gateway
+      ports:
+        - protocol: TCP
+          port: 8000

@@ -1,14 +1,39 @@
 from rest_framework.views import APIView
 from rest_framework.response import Response
 from rest_framework import status
+from .idempotency import (
+    ACTION_DEPOSIT,
+    ACTION_WITHDRAW,
+    Replay,
+    RequestConflict,
+    check_replay,
+    invalid_request_id_response,
+    record,
+    replay_after_integrity_error,
+    valid_request_id,
+)
 from .models import Account
 from .serializers import AccountDetailSerializer
 from django.conf import settings
-from django.db import connection
+from django.db import connection, IntegrityError
 from django.db import transaction
 from django.http import JsonResponse
 from .serializers import AmountInputSerializer, TransactionResponseSerializer
 from .sharding import account_filter, owns
+
+
+def _request_id_from(request):
+    """
+    Extract the client request_id, if any.
+
+    A present-but-invalid request_id is rejected so a replay can never be
+    mistaken for a new request. A missing request_id keeps the old behaviour
+    (no idempotency guarantee can be offered without a client-provided key).
+    """
+    request_id = request.data.get('request_id')
+    if request_id is not None and not valid_request_id(request_id):
+        return None
+    return request_id
 
 
 def _not_owned_response(request, action, account_number):
@@ -163,6 +188,9 @@ class DepositView(APIView):
             )
 
         amount = serializer.validated_data['amount']
+        request_id = _request_id_from(request)
+        if request.data.get('request_id') is not None and request_id is None:
+            return invalid_request_id_response()
 
         # Step 2: Execute transaction with ACID guarantees
         try:
@@ -172,9 +200,41 @@ class DepositView(APIView):
                     account_number=account_number
                 )
 
+                # Experiment 7: a repeated request_id replays the recorded
+                # response instead of applying the deposit again.
+                if request_id is not None:
+                    try:
+                        check_replay(
+                            request_id, ACTION_DEPOSIT,
+                            f'{account_number}:{amount}',
+                        )
+                    except (Replay, RequestConflict) as replay_exc:
+                        request.transaction_data.update({
+                            'action': 'deposit',
+                            'account': account_number,
+                            'result': 'error:request_id_conflict'
+                            if isinstance(replay_exc, RequestConflict)
+                            else 'success:replayed',
+                            'balance': 'N/A',
+                        })
+                        return replay_or_conflict_response(replay_exc, request_id)
+
                 # Perform the deposit
                 account.balance += amount
                 account.save()  # Durability: PostgreSQL commits to disk
+
+                # Build the response and record the ledger row in the SAME
+                # transaction, so the effect and its idempotency marker are
+                # committed together (never one without the other).
+                response_serializer = TransactionResponseSerializer({
+                    'status': 'success',
+                    'account': account.account_number,
+                    'balance': account.balance
+                })
+                response_body = response_serializer.data
+                if request_id is not None:
+                    record(request_id, ACTION_DEPOSIT,
+                           f'{account_number}:{amount}', response_body)
 
         except Account.DoesNotExist:
             # Handles Section 2.3: Unknown account
@@ -193,14 +253,14 @@ class DepositView(APIView):
                 },
                 status=status.HTTP_404_NOT_FOUND
             )
+        except IntegrityError:
+            replay_exc = replay_after_integrity_error(
+                request_id, ACTION_DEPOSIT, f'{account_number}:{amount}'
+            )
+            if replay_exc is not None:
+                return replay_or_conflict_response(replay_exc, request_id)
+            raise
 
-        # Step 3: Return success response in assignment format
-        response_serializer = TransactionResponseSerializer({
-            'status': 'success',
-            'account': account.account_number,
-            'balance': account.balance
-        })
-        
         request.transaction_data.update({
             'action': 'deposit',
             'account': account.account_number,
@@ -208,7 +268,7 @@ class DepositView(APIView):
             'balance': account.balance
         })
 
-        return Response(response_serializer.data, status=status.HTTP_200_OK)
+        return Response(response_body, status=status.HTTP_200_OK)
 
 
 class WithdrawView(APIView):
@@ -251,6 +311,9 @@ class WithdrawView(APIView):
             )
 
         amount = serializer.validated_data['amount']
+        request_id = _request_id_from(request)
+        if request.data.get('request_id') is not None and request_id is None:
+            return invalid_request_id_response()
 
         # Step 2: Execute transaction with ACID guarantees
         try:
@@ -260,6 +323,25 @@ class WithdrawView(APIView):
                     account_number=account_number
                 )
 
+                # Experiment 7: a repeated request_id replays the recorded
+                # response instead of applying the withdrawal again.
+                if request_id is not None:
+                    try:
+                        check_replay(
+                            request_id, ACTION_WITHDRAW,
+                            f'{account_number}:{amount}',
+                        )
+                    except (Replay, RequestConflict) as replay_exc:
+                        request.transaction_data.update({
+                            'action': 'withdraw',
+                            'account': account_number,
+                            'result': 'error:request_id_conflict'
+                            if isinstance(replay_exc, RequestConflict)
+                            else 'success:replayed',
+                            'balance': 'N/A',
+                        })
+                        return replay_or_conflict_response(replay_exc, request_id)
+
                 # Check for sufficient funds (Consistency: no negative balances)
                 if account.balance < amount:
                     request.transaction_data.update({
@@ -268,7 +350,7 @@ class WithdrawView(APIView):
                         'result': 'error:insufficient_funds',
                         'balance': account.balance
                     })
-                    
+
                     return Response(
                         {
                             'status': 'error',
@@ -283,6 +365,16 @@ class WithdrawView(APIView):
                 account.balance -= amount
                 account.save()  # Durability: PostgreSQL commits to disk
 
+                response_serializer = TransactionResponseSerializer({
+                    'status': 'success',
+                    'account': account.account_number,
+                    'balance': account.balance
+                })
+                response_body = response_serializer.data
+                if request_id is not None:
+                    record(request_id, ACTION_WITHDRAW,
+                           f'{account_number}:{amount}', response_body)
+
         except Account.DoesNotExist:
             # Handles Section 2.3: Unknown account
             request.transaction_data.update({
@@ -291,7 +383,7 @@ class WithdrawView(APIView):
                 'result': 'error:unknown_account',
                 'balance': 'N/A'
             })
-            
+
             return Response(
                 {
                     'status': 'error',
@@ -300,14 +392,14 @@ class WithdrawView(APIView):
                 },
                 status=status.HTTP_404_NOT_FOUND
             )
+        except IntegrityError:
+            replay_exc = replay_after_integrity_error(
+                request_id, ACTION_WITHDRAW, f'{account_number}:{amount}'
+            )
+            if replay_exc is not None:
+                return replay_or_conflict_response(replay_exc, request_id)
+            raise
 
-        # Step 3: Return success response in assignment format
-        response_serializer = TransactionResponseSerializer({
-            'status': 'success',
-            'account': account.account_number,
-            'balance': account.balance
-        })
-        
         request.transaction_data.update({
             'action': 'withdraw',
             'account': account.account_number,
@@ -315,4 +407,4 @@ class WithdrawView(APIView):
             'balance': account.balance
         })
 
-        return Response(response_serializer.data, status=status.HTTP_200_OK)
+        return Response(response_body, status=status.HTTP_200_OK)
